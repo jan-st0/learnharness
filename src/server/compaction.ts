@@ -36,10 +36,13 @@ import {
 	COMPACTION_RESERVE_TOKENS,
 	estimateContextTokens,
 	estimateTokens,
+	keepRecentTokensFor,
+	MAX_SUMMARIZATION_TOKENS,
 	newCompactionMarker,
 	planTreeToText,
 	serializeForSummary,
 	toLlmMessages,
+	validateSummary,
 	type CompactionDetails,
 	type LhMessage,
 	type LhMarkerMessage,
@@ -57,10 +60,20 @@ const SUMMARIZER_SYSTEM_PROMPT =
 /** The one-shot summary call: zero tools, one turn, text out. The engine
  *  is the chat's own conversation engine (owner ruling: the session's
  *  model writes its own summary). Injectable for tests. */
-export type Summarizer = (prompt: string, engine: PiEngine) => Promise<{ summary: string; usage: Usage }>;
+export type Summarizer = (
+	prompt: string,
+	engine: PiEngine,
+) => Promise<{ summary: string; usage: Usage; stopReason?: string }>;
 
-/** The production summarizer over the sub-agent seam. */
-async function subagentSummarizer(prompt: string, engine: PiEngine): Promise<{ summary: string; usage: Usage }> {
+/** The production summarizer over the sub-agent seam.
+ *  Uses its own isolated engine configuration:
+ *  - maxTokens clamped to MAX_SUMMARIZATION_TOKENS (~1400)
+ *  - reasoning disabled ("off" / undefined)
+ *  - does not mutate the shared tutor engine. */
+async function subagentSummarizer(
+	prompt: string,
+	engine: PiEngine,
+): Promise<{ summary: string; usage: Usage; stopReason?: string }> {
 	let usage: Usage = {
 		input: 0,
 		output: 0,
@@ -69,21 +82,33 @@ async function subagentSummarizer(prompt: string, engine: PiEngine): Promise<{ s
 		totalTokens: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
-	const { text } = await runSubagent([], {
+
+	const summarizerEngine: PiEngine = {
+		model: engine.model,
+		level: "off",
+		streamFn: (model, context, options) => {
+			return engine.streamFn(model, context, {
+				...options,
+				maxTokens: MAX_SUMMARIZATION_TOKENS,
+			});
+		},
+	};
+
+	const { text, stopReason } = await runSubagent([], {
 		// The engine override is always present (the chat's own conversation
 		// engine — owner ruling), so the role label never resolves an
 		// engine; "researcher" is the least-wrong existing ModelRole label
 		// for a one-shot text job (the cast documents the dead path).
 		role: "researcher" as never,
 		prompt,
-		engine,
+		engine: summarizerEngine,
 		systemPrompt: SUMMARIZER_SYSTEM_PROMPT,
 		maxTurns: 1,
 		onUsage: (u) => {
 			usage = u;
 		},
 	});
-	return { summary: text, usage };
+	return { summary: text, usage, stopReason };
 }
 
 /** Everything the service needs from its host (chat-handler wires the
@@ -135,12 +160,27 @@ export async function awaitCompaction(chatId: string): Promise<void> {
 
 // ─── the effective threshold (owner ruling: min(setting, window − reserve)) ─
 
-/** Resolve the effective trigger. Unknown window → the setting alone
- *  (honest: no fake window — the catalog-index precedent). */
+/**
+ * Resolve the effective trigger.
+ *
+ * LM Studio / local-model fix (2026-11-04): the reserve is now SCALED to
+ * the window — `min(16384, window × 0.3)`. The fixed 16k reserve made
+ * every small-window model (31k, 32k) unusable: `31000 − 16384 ≈ 14.6k`
+ * threshold vs a 20k kept tail meant compaction could never advance.
+ * Thirty percent keeps a workable summary + current-turn headroom on any
+ * window and falls back to the pi default on large ones.
+ *
+ * Unknown window → the setting alone (honest: no fake window — the
+ * catalog-index precedent).
+ */
 export function effectiveThresholdTokens(settingTokens: number | undefined, contextWindowTokens: number | undefined): number {
 	const setting = settingTokens ?? 150_000;
 	if (contextWindowTokens === undefined) return setting;
-	return Math.min(setting, Math.max(contextWindowTokens - COMPACTION_RESERVE_TOKENS, 1));
+	const reserve = Math.min(
+		COMPACTION_RESERVE_TOKENS,
+		Math.floor(contextWindowTokens * 0.3),
+	);
+	return Math.min(setting, Math.max(contextWindowTokens - reserve, 1));
 }
 
 // ─── the estimate over the ACTIVE projection ────────────────────────────────
@@ -174,7 +214,13 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 	const tokensBefore = projectedContextTokens(messages, deps.systemPromptTokens);
 	if (tokensBefore <= deps.thresholdTokens) return; // settled beneath while we waited
 
-	const cut = compactionCutIndex(messages);
+	// LM Studio / small-window fix (2026-11-04): the kept tail is scaled
+	// to the effective threshold. A fixed 20k tail was larger than the
+	// whole trigger on a 31k window, so the cut could never advance past
+	// the previous kept boundary and the anti-churn guard below always
+	// fired — compaction never ran and the transcript outgrew the window.
+	const keepRecent = keepRecentTokensFor(deps.thresholdTokens);
+	const cut = compactionCutIndex(messages, keepRecent);
 	if (cut <= 0 || cut >= messages.length) return; // no history can be dropped
 
 	// The previous compaction's kept boundary (chained compactions
@@ -213,10 +259,14 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 	emit("compaction-changed", { chatId, running: true });
 	try {
 		const summarize = deps.summarize ?? subagentSummarizer;
-		const { summary, usage } = await summarize(prompt, deps.engine);
-		const trimmed = summary.trim();
-		if (!trimmed) return; // an empty summary is a refusal artifact — leave the record honest
+		const { summary, usage, stopReason } = await summarize(prompt, deps.engine);
+		const validation = validateSummary(summary, record.tree, stopReason);
+		if (!validation.ok) {
+			console.warn(`[chat ${chatId}] compaction summary rejected: ${validation.reason}`);
+			return; // a rejected summary aborts compaction cleanly — leave the original history intact
+		}
 
+		const trimmed = summary.trim();
 		const firstKept = messages[cut]!;
 		const details: CompactionDetails = {
 			firstKeptMessageId: firstKept.id,

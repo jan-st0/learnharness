@@ -152,6 +152,15 @@ export function toPiModelDefinition(m: ModelCatalogEntry, baseUrl: string): Mode
 		api: "openai-completions",
 		baseUrl,
 		reasoning: m.reasoning,
+		thinkingLevelMap: m.reasoning
+			? {
+					off: "low",
+					minimal: "low",
+					low: "low",
+					medium: "medium",
+					high: "high",
+				}
+			: undefined,
 		input: m.input,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
@@ -161,7 +170,7 @@ export function toPiModelDefinition(m: ModelCatalogEntry, baseUrl: string): Mode
 			supportsDeveloperRole: false,
 			supportsStrictMode: false,
 			maxTokensField: "max_tokens",
-			supportsReasoningEffort: false,
+			supportsReasoningEffort: true,
 		},
 	};
 }

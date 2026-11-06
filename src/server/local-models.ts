@@ -11,6 +11,7 @@ export interface OllamaCachedMetadata {
 export const ollamaShowCache = new Map<string, OllamaCachedMetadata>();
 
 export const VISION_MODEL_RE = /(?<![a-z])vl(?![a-z])|vision|4o|pixtral|llava|moondream|mllama|minicpm|cogvlm|glm-4v|internvl/i;
+export const REASONING_MODEL_RE = /(?<![a-z])r1(?![a-z])|reasoning|reasoner|think|qwq|qwen|gpt|deepseek|o1|o3|ministral/i;
 
 export function clearOllamaShowCache(): void {
 	ollamaShowCache.clear();
@@ -57,16 +58,29 @@ function extractOllamaContextWindow(show: OllamaShowResponse, fallback: number):
 	return fallback;
 }
 
+/**
+ * Probe an Ollama endpoint for its model list.
+ *
+ * contextWindowOverride (LM Studio / local-model fix, 2026-11-04): when
+ * set, wins over everything the endpoint reports — the setting exists
+ * because Ollama's `/api/show` and LM Studio's `/v1/models` routinely
+ * disagree with what the model was actually LOADED with, and the app
+ * must be able to be told the truth explicitly. The user sets this in
+ * `settings.json` → `localProviders.<provider>.contextWindowOverride`.
+ */
 export async function probeOllama(
 	rawUrl: string,
-	defaultContextWindow = 32768,
-	fetchFn: typeof fetch = globalThis.fetch,
+	defaultContextWindow: number = 32768,
+	contextWindowOverride?: number | typeof fetch,
+	fetchFn?: typeof fetch,
 ): Promise<{ ok: boolean; models: ModelCatalogEntry[]; error?: string }> {
+	const override = typeof contextWindowOverride === "number" ? contextWindowOverride : undefined;
+	const realFetch = typeof contextWindowOverride === "function" ? contextWindowOverride : (fetchFn ?? globalThis.fetch);
 	const rootUrl = normalizeOllamaRootUrl(rawUrl);
 	if (!rootUrl) return { ok: false, models: [], error: "Ollama URL is empty" };
 
 	try {
-		const tagsRes = await fetchFn(`${rootUrl}/api/tags`, {
+		const tagsRes = await realFetch(`${rootUrl}/api/tags`, {
 			method: "GET",
 			signal: AbortSignal.timeout(2500),
 		});
@@ -84,7 +98,7 @@ export async function probeOllama(
 				if (cached) return { model: m, meta: cached };
 
 				try {
-					const showRes = await fetchFn(`${rootUrl}/api/show`, {
+					const showRes = await realFetch(`${rootUrl}/api/show`, {
 						method: "POST",
 						headers: { "Content-Type": "application/json" },
 						body: JSON.stringify({ name: m.name }),
@@ -94,7 +108,7 @@ export async function probeOllama(
 						const fallbackMeta: OllamaCachedMetadata = {
 							contextWindow: defaultContextWindow,
 							isVision: VISION_MODEL_RE.test(m.name),
-							isReasoning: /r1|qwq|reasoner/i.test(m.name),
+							isReasoning: REASONING_MODEL_RE.test(m.name),
 							isEmbeddingOnly: /bert|bge|embed/i.test(m.details?.family ?? "") || /nomic-embed|bge-|embed/i.test(m.name),
 						};
 						return { model: m, meta: fallbackMeta };
@@ -108,8 +122,8 @@ export async function probeOllama(
 						/nomic-embed|bge-|embed/i.test(m.name);
 
 					const isVision = Boolean(caps?.includes("vision")) || VISION_MODEL_RE.test(m.name);
-					const isReasoning = Boolean(caps?.includes("thinking")) || /r1|qwq|reasoner/i.test(m.name);
-					const contextWindow = extractOllamaContextWindow(show, defaultContextWindow);
+					const isReasoning = Boolean(caps?.includes("thinking")) || REASONING_MODEL_RE.test(m.name);
+					const contextWindow = override ?? extractOllamaContextWindow(show, defaultContextWindow);
 
 					const meta: OllamaCachedMetadata = {
 						contextWindow,
@@ -121,9 +135,9 @@ export async function probeOllama(
 					return { model: m, meta };
 				} catch {
 					const fallbackMeta: OllamaCachedMetadata = {
-						contextWindow: defaultContextWindow,
+						contextWindow: override ?? defaultContextWindow,
 						isVision: VISION_MODEL_RE.test(m.name),
-						isReasoning: /r1|qwq|reasoner/i.test(m.name),
+						isReasoning: REASONING_MODEL_RE.test(m.name),
 						isEmbeddingOnly: /bert|bge|embed/i.test(m.details?.family ?? "") || /nomic-embed|bge-|embed/i.test(m.name),
 					};
 					return { model: m, meta: fallbackMeta };
@@ -146,7 +160,7 @@ export async function probeOllama(
 				provider: "ollama",
 				reasoning: meta.isReasoning,
 				input: meta.isVision ? ["text", "image"] : ["text"],
-				supportedLevels: ["off"],
+				supportedLevels: meta.isReasoning ? ["off", "low", "medium", "high"] : ["off"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow,
 				maxTokens,
@@ -170,12 +184,27 @@ interface VLLMModelEntry {
 	};
 }
 
+/**
+ * Probe an OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp server,
+ * …) for its model list.
+ *
+ * contextWindowOverride (LM Studio fix, 2026-11-04): LM Studio's
+ * `/v1/models` returns only {id, object, owned_by} — no context-length
+ * field. Without an explicit override the app silently falls back to
+ * `defaultContextWindow` and every local load looks like 32k regardless
+ * of what was actually loaded. Set the override in settings.json to
+ * match the context length you loaded the model with in LM Studio's UI
+ * (or `--context-length` for `lms`); the app then agrees with reality.
+ */
 export async function probeVLLM(
 	rawUrl: string,
 	apiKey?: string,
-	defaultContextWindow = 32768,
-	fetchFn: typeof fetch = globalThis.fetch,
+	defaultContextWindow: number = 32768,
+	contextWindowOverride?: number | typeof fetch,
+	fetchFn?: typeof fetch,
 ): Promise<{ ok: boolean; models: ModelCatalogEntry[]; error?: string }> {
+	const override = typeof contextWindowOverride === "number" ? contextWindowOverride : undefined;
+	const realFetch = typeof contextWindowOverride === "function" ? contextWindowOverride : (fetchFn ?? globalThis.fetch);
 	const baseUrl = normalizeOpenAIBaseUrl(rawUrl);
 	if (!baseUrl) return { ok: false, models: [], error: "Base URL is empty" };
 
@@ -185,7 +214,7 @@ export async function probeVLLM(
 			headers.Authorization = `Bearer ${apiKey.trim()}`;
 		}
 
-		const res = await fetchFn(`${baseUrl}/models`, {
+		const res = await realFetch(`${baseUrl}/models`, {
 			method: "GET",
 			headers,
 			signal: AbortSignal.timeout(2500),
@@ -201,14 +230,14 @@ export async function probeVLLM(
 		const models: ModelCatalogEntry[] = [];
 		for (const entry of rawModels) {
 			if (!entry?.id || typeof entry.id !== "string") continue;
-			const contextWindow =
+			const reported =
 				(typeof entry.max_model_len === "number" && entry.max_model_len > 0 ? entry.max_model_len : undefined) ??
 				(typeof entry.context_length === "number" && entry.context_length > 0 ? entry.context_length : undefined) ??
-				(typeof entry.meta?.n_ctx_train === "number" && entry.meta.n_ctx_train > 0 ? entry.meta.n_ctx_train : undefined) ??
-				defaultContextWindow;
+				(typeof entry.meta?.n_ctx_train === "number" && entry.meta.n_ctx_train > 0 ? entry.meta.n_ctx_train : undefined);
+			const contextWindow = override ?? reported ?? defaultContextWindow;
 
 			const isVision = VISION_MODEL_RE.test(entry.id);
-			const isReasoning = /r1|qwq|reasoner|o1|o3/i.test(entry.id);
+			const isReasoning = REASONING_MODEL_RE.test(entry.id);
 			const maxTokens = Math.min(4096, Math.max(512, Math.floor(contextWindow / 2)));
 
 			models.push({
@@ -217,7 +246,7 @@ export async function probeVLLM(
 				provider: "custom",
 				reasoning: isReasoning,
 				input: isVision ? ["text", "image"] : ["text"],
-				supportedLevels: ["off"],
+				supportedLevels: isReasoning ? ["off", "low", "medium", "high"] : ["off"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow,
 				maxTokens,

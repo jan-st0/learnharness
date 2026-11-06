@@ -220,10 +220,10 @@ describe("parseCompactionSettingsBody (owner round 14)", () => {
 		assert.ok(r.ok);
 		assert.equal(r.settings.thresholdTokens, 120000);
 	});
-	it("rejects below the 32k floor with the anti-churn rationale", () => {
-		const r = parseCompactionSettingsBody({ thresholdTokens: 20_000 });
+	it("rejects below the anti-churn floor with the rationale", () => {
+		const r = parseCompactionSettingsBody({ thresholdTokens: 5_000 });
 		assert.ok(!r.ok);
-		assert.match(r.error ?? "", /at least 32000/);
+		assert.match(r.error ?? "", /at least 8000/);
 		assert.match(r.error ?? "", /churn/);
 	});
 	it("rejects non-numbers", () => {

@@ -253,7 +253,7 @@ describe("createLocalProvider and compatibility flags", () => {
 		assert.equal(piModel.compat?.supportsDeveloperRole, false);
 		assert.equal(piModel.compat?.supportsStrictMode, false);
 		assert.equal(piModel.compat?.maxTokensField, "max_tokens");
-		assert.equal(piModel.compat?.supportsReasoningEffort, false);
+		assert.equal(piModel.compat?.supportsReasoningEffort, true);
 
 		// Tight VRAM maxTokens clamp check
 		const tightEntry: ModelCatalogEntry = {

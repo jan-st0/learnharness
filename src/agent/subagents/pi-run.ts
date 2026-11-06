@@ -51,6 +51,8 @@ export interface SubagentRunResult {
 	newMessages: AgentMessage[];
 	/** The final assistant text (the deliverable). */
 	text: string;
+	/** The final assistant message's stopReason, if available. */
+	stopReason?: string;
 }
 
 export function subagentEngine(role: ModelRole, override?: PiEngine): PiEngine {
@@ -151,5 +153,6 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 				.map((c) => c.text)
 				.join("")
 		: "";
-	return { newMessages, text };
+	const stopReason = last?.stopReason;
+	return { newMessages, text, stopReason };
 }

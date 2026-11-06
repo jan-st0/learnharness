@@ -65,7 +65,7 @@ const depsOf = (chatId: string, thresholdTokens: number): CompactionDeps => ({
 		summarizeCalls++;
 		assert.ok(prompt.includes("TRANSCRIPT") || prompt.length > 0);
 		return {
-			summary: `SUMMARY #${summarizeCalls}: the learner knows X.`,
+			summary: `## The learner's understanding\nSUMMARY #${summarizeCalls}: the learner knows X.\n\n## The teaching arc\nArc details.\n\n## The plan dependency tree\nNo plan.\n\n## The current moment\nNow.`,
 			usage: { input: 1_000, output: 500, cacheRead: 0, cacheWrite: 0, totalTokens: 1_500, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 		};
 	},
@@ -154,7 +154,7 @@ describe("the compaction service", () => {
 			summarize: async (prompt) => {
 				seenPrompt = prompt;
 				return {
-					summary: "SECOND SUMMARY.",
+					summary: "## The learner's understanding\nSECOND SUMMARY.\n\n## The teaching arc\nArc.\n\n## The plan dependency tree\nNone.\n\n## The current moment\nNow.",
 					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 				};
 			},

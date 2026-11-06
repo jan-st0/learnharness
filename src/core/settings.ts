@@ -347,20 +347,37 @@ export interface GraphSettings {
  *
  * FACTORY DEFAULT 150_000 (owner ruling).
  *
- * FLOOR 32_000 (implementer's call, the chunk-budget discipline): below
- * the kept tail (20k) + a summary the chat would re-compact every turn —
- * a burn, not a preference. NO CEILING: a huge threshold just means "fit
- * everything" until the window rule binds.
+ * FLOOR 8_000 (LM Studio / local-model fix, 2026-11-04 — was 32_000): a
+ * 31k local model needs a threshold below 32k to be usable at all. The
+ * floor's job is now only anti-churn: the kept-tail reserve is capped at
+ * half the effective threshold in core/compaction.ts (keepRecentTokensFor),
+ * so a threshold as low as 8k leaves a 4k tail + headroom for summary
+ * and the current turn — enough that consecutive compactions always
+ * advance. NO CEILING: a huge threshold just means "fit everything"
+ * until the window rule binds.
  */
 export interface CompactionSettings {
 	thresholdTokens?: number;
 }
 
-/** Local provider configuration (Ollama and custom/vLLM endpoints). */
+/**
+ * Local provider configuration (Ollama and custom/vLLM endpoints —
+ * which includes LM Studio).
+ *
+ * contextWindowOverride (LM Studio / local-model fix, 2026-11-04): the
+ * explicit context window this endpoint's models were actually LOADED
+ * with. Wins over whatever the endpoint reports, and over
+ * defaultContextWindow. Needed because LM Studio's `/v1/models` returns
+ * no context-length field at all, and Ollama's `/api/show` sometimes
+ * disagrees with the loaded modelfile. Set it to match the load (e.g.
+ * `contextWindowOverride: 31000` for a 31k LM Studio load) so the app's
+ * compaction accounting agrees with reality.
+ */
 export interface LocalProviderConfig {
 	enabled?: boolean;
 	baseUrl?: string;
 	defaultContextWindow?: number;
+	contextWindowOverride?: number;
 }
 
 export interface LocalProvidersSettings {
@@ -405,8 +422,8 @@ export interface FactorySettings {
 	version: number;
 	general: Required<GeneralSettings>;
 	localProviders: {
-		ollama: Required<LocalProviderConfig>;
-		custom: Required<LocalProviderConfig>;
+		ollama: Required<Omit<LocalProviderConfig, "contextWindowOverride">> & { contextWindowOverride?: number };
+		custom: Required<Omit<LocalProviderConfig, "contextWindowOverride">> & { contextWindowOverride?: number };
 	};
 	appearance: {
 		mode: "dark" | "light";
@@ -622,8 +639,14 @@ function sanitizeGraph(raw: Record<string, unknown>): GraphSettings {
 /** clamp-never-reject (the sanitizer's discipline): a finite positive
  *  number floors to COMPACTION_THRESHOLD_FLOOR, anything else drops (the
  *  factory default resolves at read time). Exported for the PUT parser's
- *  reject-with-rationale (the graph chunk-budget precedent). */
-export const COMPACTION_THRESHOLD_FLOOR = 32_000;
+ *  reject-with-rationale (the graph chunk-budget precedent).
+ *
+ *  LM Studio / local-model fix (2026-11-04): lowered from 32_000 to
+ *  8_000. The 32k floor made any value the user tried to write on a 31k
+ *  local model get silently clamped away — the setting appeared to "not
+ *  load". 8k is the anti-churn floor now that the kept-tail reserve is
+ *  capped at half the threshold (keepRecentTokensFor in core/compaction.ts). */
+export const COMPACTION_THRESHOLD_FLOOR = 8_000;
 
 function sanitizeCompaction(raw: Record<string, unknown>): CompactionSettings {
 	const out: CompactionSettings = {};
@@ -645,6 +668,14 @@ function sanitizeLocalProvider(raw: unknown): LocalProviderConfig | undefined {
 	}
 	if (typeof r.defaultContextWindow === "number" && Number.isFinite(r.defaultContextWindow) && r.defaultContextWindow > 0) {
 		out.defaultContextWindow = Math.floor(r.defaultContextWindow);
+	}
+	// LM Studio / local-model fix (2026-11-04): the explicit context-window
+	// override — the ONLY way to tell the app what a LM Studio model was
+	// actually loaded with (its /v1/models reports no context length). A
+	// finite positive number floors to an integer; anything else drops and
+	// resolution falls back to defaultContextWindow.
+	if (typeof r.contextWindowOverride === "number" && Number.isFinite(r.contextWindowOverride) && r.contextWindowOverride > 0) {
+		out.contextWindowOverride = Math.floor(r.contextWindowOverride);
 	}
 	return Object.keys(out).length ? out : undefined;
 }

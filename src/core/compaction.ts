@@ -48,8 +48,40 @@ import type { AssistantMessage, ToolResultMessage, SystemMessage } from "@earend
  * summary — recency is cheap insurance against summary loss. */
 export const KEEP_RECENT_TOKENS = 20_000;
 
+/** Maximum generation token limit for the compaction summarizer.
+ * Increased to 2,800 to provide enough headroom for local models (e.g. gpt-oss-20b)
+ * that generate 1,000-1,400 internal reasoning tokens before emitting output text,
+ * ensuring the ~700-1,100 token summary content completes without length cutoff. */
+export const MAX_SUMMARIZATION_TOKENS = 2_800;
+
+/** Recommended minimum/maximum output token targets for summary prompt content. */
+export const SUMMARY_TARGET_MIN_TOKENS = 700;
+export const SUMMARY_TARGET_MAX_TOKENS = 1_100;
+
+/**
+ * THE SMALL-WINDOW GUARD (LM Studio / local-model fix, 2026-11-04): the
+ * kept tail must never exceed HALF the effective threshold. The failure
+ * mode this exists for: a 31k local model with threshold ≈ 14.6k and
+ * kept tail = 20k. Every compaction would keep MORE tokens than the
+ * threshold, so the next compaction's cut can never advance past the
+ * previous kept boundary, the anti-churn guard in server/compaction.ts
+ * fires, and the transcript grows past the window unchecked — the
+ * teacher model truncates to one token. Half the threshold leaves
+ * headroom for the summary + the current turn, so the next compaction
+ * always has a span to eat.
+ *
+ * Floor 2000: below that a "kept tail" is too short to carry recent
+ * context honestly. Cap KEEP_RECENT_TOKENS: the 20k owner default
+ * stands for large windows.
+ */
+export function keepRecentTokensFor(thresholdTokens: number): number {
+	return Math.min(KEEP_RECENT_TOKENS, Math.max(2_000, Math.floor(thresholdTokens / 2)));
+}
+
 /** The reserve subtracted from the model's contextWindow when the window
- * (not the user's threshold) is the binding constraint (pi's default). */
+ * (not the user's threshold) is the binding constraint (pi's default).
+ * server/compaction.ts's effectiveThresholdTokens scales this down for
+ * small windows — see the note there. */
 export const COMPACTION_RESERVE_TOKENS = 16_384;
 
 /** Factory default for the settings threshold (owner ruling: 150k). */
@@ -205,7 +237,11 @@ function cutMessage(message: LhMessage): LhMessage | null {
  * No encrypted-signature sizing and no exact retained-token guarantee.
  * Returns the first kept record index; a zero/no-progress cut drops nothing.
  * Keep this and estimateMessageTokens aligned deliberately when upgrading Pi.
- */
+ *
+ * keepRecentTokens now comes from keepRecentTokensFor(threshold) in
+ * server/compaction.ts (LM Studio fix, 2026-11-04) — the caller passes
+ * a value scaled to the effective threshold. The 20k default remains
+ * for callers that omit it (large-window sessions). */
 export function compactionCutIndex(messages: readonly LhMessage[], keepRecentTokens = KEEP_RECENT_TOKENS): number {
 	const previous = activeCompactionOf(messages);
 	const previousKept = previous ? keptIndexFor(messages, previous) : -1;
@@ -382,25 +418,91 @@ export function buildCompactionPrompt(input: {
 		input.planTreeText ?? "No plan tree exists in this session (nothing was persisted).";
 	return `You are compacting the earlier part of a tutoring session — writing the summary your future self will read INSTEAD of that transcript. Everything before the cut is replaced by what you write; everything after stays verbatim. The learner's transcript below labels the learner as [LEARNER], the tutoring agent as [TUTOR], tool traffic as [RESULT …]/[SYSTEM NOTE].
 
+Aim for approximately ${SUMMARY_TARGET_MIN_TOKENS}–${SUMMARY_TARGET_MAX_TOKENS} tokens of summary content. Keep any internal reasoning brief and direct; produce the four required sections immediately. Be concise, dense, and factual. Do not reproduce the conversation or repeat long explanations. Do not invent learner knowledge; label uncertainty when necessary.
+
+Preserve information in this priority order:
+1. Learner state (what is understood, misconceptions, corrections, unresolved gaps, evidence)
+2. Teaching state (topics covered and order, what worked or failed, current strategy)
+3. Plan and dependencies (preserve every plan node ID verbatim, relations, and statuses)
+4. Immediate continuation (exact active question/problem, promises made, immediate next action)
+
 Write the summary with EXACTLY these sections, in this order:
 
 ## The learner's understanding
-The most detailed picture you can give of what this learner knows and how that EVOLVED across the session: what they answered and how well (quiz outcomes, correct reasoning, mistakes), their stated or displayed confidence, misconceptions that surfaced, which were corrected and which still stand. This section carries the most weight — future teaching decisions hang on it.
+The most detailed picture you can give of what this learner demonstrably knows and how that EVOLVED across the session: quiz outcomes, correct reasoning, important mistakes and misconceptions, what has been corrected, what remains unresolved, and stated or displayed confidence. This section carries the most weight — future teaching decisions hang on it.
 
 ## The teaching arc
-How the session progressed: what was covered and in what order, which explanations landed and which didn't, how the learner responded, where the momentum went. Include probe-phase findings if present.
+How the session progressed: topics covered and their order, explanations and pedagogical approaches that worked or did not work, how the learner responded, and current teaching strategy. Include probe-phase findings if present.
 
 ## The plan dependency tree
-Reproduce the session's current plan tree verbatim from the structure below — do not drop nodes, edges, or statuses.
+Reproduce the session's current plan tree verbatim from the structure below — do not drop nodes, edges, or statuses. Keep every node ID exactly intact.
 
 ${planSection}
 
 ## The current moment
-What is happening RIGHT NOW at the cut: any question or problem awaiting the learner's answer, any commitment the agent has made that a later turn must honor, and the immediate next step.
+What is happening RIGHT NOW at the cut: the exact unanswered question or active problem awaiting the learner's answer, what the tutor promised to do, and the next action the tutor should take.
 
 Rules: no praise, no filler, no speculation beyond the transcript. Every claim about the learner must be traceable to what they actually said or answered. Keep every identifier (proposition ids, node ids, file paths) exact.
 
 TRANSCRIPT TO SUMMARIZE:
 
 ${input.spanText}`;
+}
+
+export interface SummaryValidationResult {
+	ok: boolean;
+	reason?: string;
+}
+
+/**
+ * Validates a generated summary structurally and against generation signals:
+ * - Rejects summaries stopped due to length limit (truncation)
+ * - Rejects empty or whitespace-only summaries
+ * - Rejects summaries missing required section headings
+ * - Rejects summaries that drop existing plan node IDs
+ */
+export function validateSummary(
+	summary: string,
+	planTree: PlanTree | undefined,
+	stopReason?: string,
+): SummaryValidationResult {
+	if (stopReason === "length") {
+		return { ok: false, reason: "Summary generation stopped due to token length limit (truncated output)" };
+	}
+
+	const trimmed = summary.trim();
+	if (!trimmed) {
+		return { ok: false, reason: "Summary output is empty" };
+	}
+
+	const requiredHeadings = [
+		"## The learner's understanding",
+		"## The teaching arc",
+		"## The plan dependency tree",
+		"## The current moment",
+	];
+
+	for (const heading of requiredHeadings) {
+		if (!trimmed.includes(heading)) {
+			return { ok: false, reason: `Summary is missing required section heading: "${heading}"` };
+		}
+	}
+
+	// Verify plan node IDs are preserved if a plan tree with nodes was present
+	if (planTree && planTree.nodes.length > 0) {
+		const missingNodeIds: string[] = [];
+		for (const node of planTree.nodes) {
+			if (!trimmed.includes(node.id)) {
+				missingNodeIds.push(node.id);
+			}
+		}
+		if (missingNodeIds.length > 0) {
+			return {
+				ok: false,
+				reason: `Summary dropped required plan node ID(s): ${missingNodeIds.join(", ")}`,
+			};
+		}
+	}
+
+	return { ok: true };
 }

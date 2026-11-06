@@ -399,6 +399,16 @@ export function parseLocalProvidersSettingsBody(body: unknown): SettingsBodyResu
 			}
 			config.defaultContextWindow = Math.floor(ollama.defaultContextWindow);
 		}
+		// LM Studio / local-model fix (2026-11-04): the explicit context-
+		// window override — wins over whatever the endpoint reports. Ollama
+		// gets the same treatment for parity, though its /api/show usually
+		// gives a real number.
+		if (ollama.contextWindowOverride !== undefined) {
+			if (typeof ollama.contextWindowOverride !== "number" || !Number.isFinite(ollama.contextWindowOverride) || ollama.contextWindowOverride <= 0) {
+				return { ok: false, error: "ollama.contextWindowOverride must be positive number" };
+			}
+			config.contextWindowOverride = Math.floor(ollama.contextWindowOverride);
+		}
 		settings.ollama = config;
 	}
 	if (raw.custom !== undefined) {
@@ -418,6 +428,15 @@ export function parseLocalProvidersSettingsBody(body: unknown): SettingsBodyResu
 				return { ok: false, error: "custom.defaultContextWindow must be positive number" };
 			}
 			config.defaultContextWindow = Math.floor(custom.defaultContextWindow);
+		}
+		// LM Studio's /v1/models reports no context length at all — this
+		// is the ONLY way to tell the app what the model was actually
+		// loaded with. See server/local-models.ts probeVLLM's doc.
+		if (custom.contextWindowOverride !== undefined) {
+			if (typeof custom.contextWindowOverride !== "number" || !Number.isFinite(custom.contextWindowOverride) || custom.contextWindowOverride <= 0) {
+				return { ok: false, error: "custom.contextWindowOverride must be positive number" };
+			}
+			config.contextWindowOverride = Math.floor(custom.contextWindowOverride);
 		}
 		settings.custom = config;
 	}

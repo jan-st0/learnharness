@@ -716,10 +716,14 @@ export function Chat({
 	 * when nothing is active; the two never overlap). */
 	useEnterSubmits(sendNext);
 
+	const syncSeqRef = useRef(0);
 	const syncFromServer = useCallback(async () => {
+		const seq = ++syncSeqRef.current;
 		const res = await fetch(`/api/chats/${chatId}`);
 		if (!res.ok) return;
+		if (seq < syncSeqRef.current) return; // Stale fetch response discarded
 		const record = (await res.json()) as { messages?: LhMessage[]; turns?: TurnUsage[]; pricing?: SessionPricing; turnError?: string };
+		if (seq < syncSeqRef.current) return;
 		if (Array.isArray(record.turns)) setTurns(record.turns);
 		setPricing(record.pricing);
 		if (!Array.isArray(record.messages)) return;

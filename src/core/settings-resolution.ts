@@ -89,8 +89,8 @@ export interface EffectiveSettings {
 	 *  picker captions and the per-need refusal gates read. */
 	models: Record<ModelSlotName, EffectiveSlot | null>;
 	localProviders: {
-		ollama: Required<import("./settings.ts").LocalProviderConfig>;
-		custom: Required<import("./settings.ts").LocalProviderConfig>;
+		ollama: Required<Omit<import("./settings.ts").LocalProviderConfig, "contextWindowOverride">> & { contextWindowOverride?: number };
+		custom: Required<Omit<import("./settings.ts").LocalProviderConfig, "contextWindowOverride">> & { contextWindowOverride?: number };
 	};
 	appearance: EffectiveAppearance;
 	graph: Required<GraphSettings>;
@@ -225,11 +225,17 @@ export function resolveSettings(record: UserSettings | null): EffectiveSettings 
 				enabled: record?.localProviders?.ollama?.enabled ?? FACTORY_SETTINGS.localProviders.ollama.enabled,
 				baseUrl: record?.localProviders?.ollama?.baseUrl ?? FACTORY_SETTINGS.localProviders.ollama.baseUrl,
 				defaultContextWindow: record?.localProviders?.ollama?.defaultContextWindow ?? FACTORY_SETTINGS.localProviders.ollama.defaultContextWindow,
+				...(record?.localProviders?.ollama?.contextWindowOverride !== undefined
+					? { contextWindowOverride: record.localProviders.ollama.contextWindowOverride }
+					: {}),
 			},
 			custom: {
 				enabled: record?.localProviders?.custom?.enabled ?? FACTORY_SETTINGS.localProviders.custom.enabled,
 				baseUrl: record?.localProviders?.custom?.baseUrl ?? FACTORY_SETTINGS.localProviders.custom.baseUrl,
 				defaultContextWindow: record?.localProviders?.custom?.defaultContextWindow ?? FACTORY_SETTINGS.localProviders.custom.defaultContextWindow,
+				...(record?.localProviders?.custom?.contextWindowOverride !== undefined
+					? { contextWindowOverride: record.localProviders.custom.contextWindowOverride }
+					: {}),
 			},
 		},
 	};

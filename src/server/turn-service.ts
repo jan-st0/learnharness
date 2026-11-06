@@ -29,7 +29,11 @@ import { ModelsNotConfiguredError, ProviderKeyMissingError } from "../core/setti
 /** Distinguish a failed canonical save from later bookkeeping failures. */
 export class TurnPersistenceError extends Error {
 	constructor(cause: unknown) {
-		super("The reply could not be saved.", { cause });
+		const message =
+			cause instanceof Error && cause.message.includes("Token limit reached")
+				? cause.message
+				: "The reply could not be saved.";
+		super(message, { cause });
 		this.name = "TurnPersistenceError";
 	}
 }
@@ -69,6 +73,23 @@ export function persistTurn(
 		const stamped: LhMessage[] = [];
 		for (const m of turnMessages.slice(baseCount)) {
 			const message = m as LhMessage;
+			// Guard against empty / 1-token length-stopped assistant response artifacts
+			if ((message as { role?: string }).role === "assistant") {
+				const asst = message as { content?: Array<{ type?: string; text?: string }>; stopReason?: string; usage?: { output?: number } };
+				const contentBlocks = asst.content ?? [];
+				const text = contentBlocks
+					.filter((c) => c.type === "text" && typeof c.text === "string")
+					.map((c) => c.text)
+					.join("")
+					.trim();
+				const hasToolCall = contentBlocks.some((c) => c.type === "toolCall");
+				const isOneTokenOrEmpty = (asst.usage?.output ?? 0) <= 1 && text.length === 0 && !hasToolCall;
+				if (asst.stopReason === "length" && isOneTokenOrEmpty) {
+					throw new Error(
+						"Token limit reached or context overflowed before output could be generated. Please retry or adjust model context.",
+					);
+				}
+			}
 			// The placeholder question result: loop device, never a record fact.
 			if (
 				(message as { role?: string }).role === "toolResult" &&
