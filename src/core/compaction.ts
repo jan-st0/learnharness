@@ -60,22 +60,22 @@ export const SUMMARY_TARGET_MAX_TOKENS = 1_100;
 
 /**
  * THE SMALL-WINDOW GUARD (LM Studio / local-model fix, 2026-11-04): the
- * kept tail must never exceed HALF the effective threshold. The failure
- * mode this exists for: a 31k local model with threshold ≈ 14.6k and
- * kept tail = 20k. Every compaction would keep MORE tokens than the
- * threshold, so the next compaction's cut can never advance past the
- * previous kept boundary, the anti-churn guard in server/compaction.ts
- * fires, and the transcript grows past the window unchecked — the
- * teacher model truncates to one token. Half the threshold leaves
- * headroom for the summary + the current turn, so the next compaction
- * always has a span to eat.
+ * kept tail must never exceed approximately one third of the effective threshold.
+ * The failure mode this exists for: a 31k local model with threshold ≈ 21k.
+ * If kept tail = half the threshold (~10.5k), as turns accumulate, the next
+ * cut index cannot advance past the previous kept boundary, and the anti-churn
+ * guard in server/compaction.ts fires repeatedly:
+ * `compaction skipped — the kept tail alone exceeds the threshold`.
+ * By targeting ~35% of the threshold (capped at KEEP_RECENT_TOKENS), the kept
+ * boundary reliably advances on subsequent turns, allowing compaction to shed
+ * older turns and keep the context well below the context window limit.
  *
  * Floor 2000: below that a "kept tail" is too short to carry recent
  * context honestly. Cap KEEP_RECENT_TOKENS: the 20k owner default
  * stands for large windows.
  */
 export function keepRecentTokensFor(thresholdTokens: number): number {
-	return Math.min(KEEP_RECENT_TOKENS, Math.max(2_000, Math.floor(thresholdTokens / 2)));
+	return Math.min(KEEP_RECENT_TOKENS, Math.max(2_000, Math.round(thresholdTokens * 0.35)));
 }
 
 /** The reserve subtracted from the model's contextWindow when the window

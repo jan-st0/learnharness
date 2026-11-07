@@ -75,15 +75,22 @@ export function persistTurn(
 			const message = m as LhMessage;
 			// Guard against empty / 1-token length-stopped assistant response artifacts
 			if ((message as { role?: string }).role === "assistant") {
-				const asst = message as { content?: Array<{ type?: string; text?: string }>; stopReason?: string; usage?: { output?: number } };
+				const asst = message as { content?: Array<{ type?: string; text?: string; thinking?: string }>; stopReason?: string; usage?: { output?: number } };
 				const contentBlocks = asst.content ?? [];
 				const text = contentBlocks
 					.filter((c) => c.type === "text" && typeof c.text === "string")
 					.map((c) => c.text)
 					.join("")
 					.trim();
+				const thinking = contentBlocks
+					.filter((c) => c.type === "thinking" && typeof c.thinking === "string")
+					.map((c) => c.thinking)
+					.join("")
+					.trim();
 				const hasToolCall = contentBlocks.some((c) => c.type === "toolCall");
-				const isOneTokenOrEmpty = (asst.usage?.output ?? 0) <= 1 && text.length === 0 && !hasToolCall;
+				// Rejection condition: ONLY reject if the response has genuinely NO meaningful output
+				// (0 or 1 token output, no text, no thinking, no tool calls) and stopped due to length.
+				const isOneTokenOrEmpty = (asst.usage?.output ?? 0) <= 1 && text.length === 0 && thinking.length === 0 && !hasToolCall;
 				if (asst.stopReason === "length" && isOneTokenOrEmpty) {
 					throw new Error(
 						"Token limit reached or context overflowed before output could be generated. Please retry or adjust model context.",

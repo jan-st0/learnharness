@@ -107,7 +107,7 @@ describe("Small-window dynamic context retention (31,000 token window)", () => {
 		assert.equal(threshold, 21_000);
 
 		const keptTail = keepRecentTokensFor(threshold);
-		assert.equal(keptTail, 10_500); // exactly half the threshold
+		assert.equal(keptTail, 7_350); // 35% of the threshold
 		assert.ok(keptTail < threshold, "kept tail is strictly below threshold");
 		assert.ok(threshold + 9_300 <= window, "threshold + reserve fits inside context window");
 	});
